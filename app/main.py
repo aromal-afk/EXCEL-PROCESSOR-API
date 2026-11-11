@@ -1,4 +1,6 @@
 
+import os
+
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from google.api_core.exceptions import GoogleAPICallError
@@ -22,9 +24,12 @@ app = FastAPI(
 app.include_router(jobs_router)
 
 # Allow React frontend to communicate with FastAPI
+# CORS_ORIGINS is a comma-separated list of allowed origins.
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173"],
+    allow_origins=os.getenv(
+        "CORS_ORIGINS", "http://localhost:5173"
+    ).split(","),
     allow_methods=["*"],
     allow_headers=["*"],
 )

@@ -4,28 +4,18 @@ from datetime import timedelta
 
 import google.auth
 from google.auth.transport.requests import Request
-from google.cloud import firestore, storage
-from google.oauth2 import service_account
 
-PROJECT_ID = os.getenv(
-    "GCP_PROJECT_ID", "bulk-excel-processor"
-)
-BUCKET_NAME = os.getenv(
-    "BUCKET_NAME", "bulk-excel-processor"
-)
-DATABASE_ID = os.getenv(
-    "FIRESTORE_DATABASE", "(default)"
+from app.services.gcp import (
+    storage_client,
+    firestore_client,
+    BUCKET_NAME,
 )
 
-db = firestore.Client(
-    project=PROJECT_ID,
-    database=DATABASE_ID,
-)
-storage_client = storage.Client(project=PROJECT_ID)
+SIGNER_EMAIL = os.environ["GCP_SIGNER_SERVICE_ACCOUNT"]
 
 
 def get_error_report_download_url(job_id: str):
-    job_ref = db.collection("jobs").document(job_id)
+    job_ref = firestore_client.collection("jobs").document(job_id)
     snapshot = job_ref.get()
 
     if not snapshot.exists:
@@ -61,16 +51,11 @@ def get_error_report_download_url(job_id: str):
     # Locally, ADC user credentials generally cannot
     # sign URLs directly. IAM signBlob can sign through
     # the dedicated service account.
-    signer_email = os.getenv(
-        "SIGNER_SERVICE_ACCOUNT",
-        "excel-upload-signer@bulk-excel-processor.iam.gserviceaccount.com",
-    )
-
     signed_url = blob.generate_signed_url(
         version="v4",
         expiration=timedelta(minutes=15),
         method="GET",
-        service_account_email=signer_email,
+        service_account_email=SIGNER_EMAIL,
         access_token=credentials.token,
         response_disposition='attachment; filename="errors.csv"',
     )

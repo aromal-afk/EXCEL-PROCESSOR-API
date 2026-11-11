@@ -1,5 +1,5 @@
 \
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from uuid import uuid4
 
@@ -22,6 +22,21 @@ from app.services.pubsub import publish_processing_job
 router = APIRouter(prefix="/jobs", tags=["Jobs"])
 
 TERMINAL_STATUSES = ("Completed", "CompletedWithErrors")
+
+# A job left in Queueing this long lost its publish acknowledgement and may
+# be republished; the worker's transactional claim makes duplicates harmless.
+QUEUEING_STALE_AFTER = timedelta(minutes=2)
+
+
+def _is_stale_queueing(job):
+    updated_at = job.get("updated_at")
+
+    return (
+        job.get("status") == "Queueing"
+        and updated_at is not None
+        and updated_at
+        < datetime.now(timezone.utc) - QUEUEING_STALE_AFTER
+    )
 
 
 class CreateJobRequest(BaseModel):
@@ -167,12 +182,13 @@ def _claim_for_queueing(transaction, job_ref):
     ):
         return current_status, job
 
-    if current_status == "Queueing":
+    if current_status == "Queueing" and not _is_stale_queueing(job):
         return "Queueing", job
 
     if current_status not in (
         "AwaitingUpload",
         "Uploaded",
+        "Queueing",
     ):
         return "Invalid", job
 
@@ -267,7 +283,7 @@ def confirm_upload(job_id: str):
         }
 
     # Another request has already claimed this job.
-    if current_status == "Queueing":
+    if current_status == "Queueing" and not _is_stale_queueing(job):
         return {
             "job_id": job_id,
             "status": "Queueing",
@@ -276,6 +292,7 @@ def confirm_upload(job_id: str):
     if current_status not in (
         "AwaitingUpload",
         "Uploaded",
+        "Queueing",
     ):
         raise HTTPException(
             status_code=409,
@@ -364,3 +381,34 @@ def confirm_upload(job_id: str):
         "status": final_status,
         "message": "Excel processing job submitted successfully",
     }
+
+
+# --------------------------------------------------
+# Republish jobs stuck in Queueing (e.g. from Cloud Scheduler)
+# --------------------------------------------------
+
+@router.post("/reconcile")
+def reconcile_stuck_jobs():
+    snapshots = (
+        firestore_client.collection("jobs")
+        .where(filter=firestore.FieldFilter("status", "==", "Queueing"))
+        .stream()
+    )
+
+    results = []
+
+    for snapshot in snapshots:
+        if not _is_stale_queueing(snapshot.to_dict()):
+            continue
+
+        try:
+            outcome = confirm_upload(snapshot.id)
+            results.append(
+                {"job_id": snapshot.id, "status": outcome["status"]}
+            )
+        except HTTPException as exc:
+            results.append(
+                {"job_id": snapshot.id, "error": exc.detail}
+            )
+
+    return {"reconciled": results}
